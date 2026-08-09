@@ -1,7 +1,17 @@
+import * as crypto from "crypto";
+import * as fs from "fs";
+import * as path from "path";
 import type { ChallengeAuth } from "../auth/challenge-auth.js";
 import type { ExternalMessage, SendMessageOptions } from "../types.js";
 import type { ITransportProvider } from "./interface.js";
 import { formatForSlack } from "./slack-utils.js";
+
+const MAX_UPLOAD_BYTES = 20 * 1024 * 1024; // 20MB
+
+/** Strip anything but a conservative filename character set. */
+function sanitizeFilename(name: string): string {
+  return name.replace(/[^a-zA-Z0-9._-]/g, "_") || "file";
+}
 
 // Dynamic import for ESM modules
 type App = any;
@@ -27,11 +37,16 @@ export class SlackProvider implements ITransportProvider {
   private userCache: Map<string, string> = new Map();
   // Cache channel info to detect DMs vs channels
   private channelCache: Map<string, { isDM: boolean; name?: string }> = new Map();
+  // Where inbound file attachments are saved — under the current project workspace, not the user's home dir
+  private uploadsDir: string;
 
   constructor(
     private config: { botToken: string; appToken: string },
-    private auth: ChallengeAuth
-  ) {}
+    private auth: ChallengeAuth,
+    cwd: string
+  ) {
+    this.uploadsDir = path.join(cwd, ".pi", "msg-bridge-uploads");
+  }
 
   get isConnected(): boolean {
     return this._isConnected;
@@ -66,19 +81,21 @@ export class SlackProvider implements ITransportProvider {
 
     // Listen for all messages
     this.app.message(async ({ message, client }: any) => {
-      // Skip bot messages, message edits, deletes, etc.
-      if (message.subtype) {
+      // Skip bot messages, edits, deletes, etc. — but allow file uploads (subtype "file_share") through.
+      if (message.subtype && message.subtype !== "file_share") {
         return;
       }
 
+      const files: any[] = Array.isArray(message.files) ? message.files : [];
+
       // TypeScript type guard for regular messages
-      if (!("user" in message) || !("text" in message) || !message.text) {
+      if (!("user" in message) || (!message.text && files.length === 0)) {
         return;
       }
 
       const userId = message.user;
       const channelId = message.channel;
-      const text = message.text;
+      const text = message.text || "";
       const ts = message.ts;
       const threadTs = message.thread_ts;
 
@@ -166,12 +183,28 @@ export class SlackProvider implements ITransportProvider {
         return; // Auth handler already sent challenge/error messages
       }
 
+      // Save any attachments to disk (any file type) and note their local path so the
+      // agent can inspect them with its own read/bash tools.
+      const fileNotes: string[] = [];
+      for (const file of files) {
+        const savedPath = await this.downloadAndSaveFile(file);
+        if (savedPath) {
+          const sizeKb = typeof file.size === "number" ? `${Math.round(file.size / 1024)}KB` : "unknown size";
+          fileNotes.push(
+            `[User attached a file, saved to ${savedPath} (name: ${file.name || "unnamed"}, type: ${file.mimetype || file.filetype || "unknown"}, ${sizeKb})]`
+          );
+        } else {
+          fileNotes.push(`[Attached file "${file.name || "unnamed"}" could not be downloaded]`);
+        }
+      }
+      const content = [text.trim(), ...fileNotes].filter(Boolean).join("\n");
+
       // Forward to message handler
       if (this.messageHandler) {
         const externalMessage: ExternalMessage = {
           chatId: channelId,
           transport: this.type,
-          content: text.trim(),
+          content,
           username: username,
           userId: userId,
           timestamp: new Date(parseFloat(ts) * 1000),
@@ -216,6 +249,33 @@ export class SlackProvider implements ITransportProvider {
     console.log("[Slack] Disconnected");
   }
 
+  /**
+   * Download a Slack file attachment (any type) and save it to disk, capped at MAX_UPLOAD_BYTES.
+   * Returns the saved absolute path, or null on failure.
+   */
+  private async downloadAndSaveFile(file: any): Promise<string | null> {
+    if (!file.url_private || (typeof file.size === "number" && file.size > MAX_UPLOAD_BYTES)) {
+      return null;
+    }
+    try {
+      const res = await fetch(file.url_private, {
+        headers: { Authorization: `Bearer ${this.config.botToken}` },
+      });
+      if (!res.ok) return null;
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.byteLength > MAX_UPLOAD_BYTES) return null;
+
+      fs.mkdirSync(this.uploadsDir, { recursive: true, mode: 0o700 });
+      const uniquePrefix = crypto.randomBytes(4).toString("hex");
+      const filename = `${file.id || uniquePrefix}-${sanitizeFilename(file.name || "file")}`;
+      const savedPath = path.join(this.uploadsDir, filename);
+      fs.writeFileSync(savedPath, buf, { mode: 0o600 });
+      return savedPath;
+    } catch {
+      return null;
+    }
+  }
+
   async sendMessage(chatId: string, text: string, options?: SendMessageOptions): Promise<void> {
     if (!this.app) {
       throw new Error("Slack not connected");
@@ -230,6 +290,30 @@ export class SlackProvider implements ITransportProvider {
       });
     } catch (error) {
       throw new Error(`Slack send failed: ${(error as Error).message}`);
+    }
+  }
+
+  /** Upload an existing local file to a Slack chat, e.g. from the slack_upload_file tool. */
+  async uploadFile(
+    chatId: string,
+    filePath: string,
+    options?: { comment?: string; threadTs?: string }
+  ): Promise<void> {
+    if (!this.app) {
+      throw new Error("Slack not connected");
+    }
+
+    try {
+      const buf = fs.readFileSync(filePath);
+      await this.app.client.files.uploadV2({
+        channel_id: chatId,
+        thread_ts: options?.threadTs,
+        file: buf,
+        filename: path.basename(filePath),
+        initial_comment: options?.comment,
+      });
+    } catch (error) {
+      throw new Error(`Slack file upload failed: ${(error as Error).message}`);
     }
   }
 
