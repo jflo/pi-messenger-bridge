@@ -34,6 +34,25 @@ export default function (pi: ExtensionAPI): void {
   let ctx: ExtensionContext;
 
   /**
+   * ctx is captured once per session_start and reused by async work (transport
+   * init, background reconnects, message-send error handling) that can still
+   * be in flight when pi replaces/reloads the session — at which point ctx.ui
+   * throws "extension ctx is stale after session replacement or reload"
+   * instead of returning. That throw is uncaught in these deferred contexts
+   * and crashes the whole process (confirmed: this is why the bot's tmux
+   * session was dying every few minutes in production). A lost notification
+   * is harmless; a crashed bot is not — so swallow staleness here rather
+   * than propagate it.
+   */
+  function safeNotify(message: string, level?: "info" | "warning" | "error"): void {
+    try {
+      ctx.ui.notify(message, level);
+    } catch (err) {
+      console.error(`[msg-bridge] dropped notification (stale ctx?): ${message}`, err);
+    }
+  }
+
+  /**
    * Restrict or restore the agent's active tools, skipping redundant calls (each call rebuilds
    * the system prompt). Used to put non-admin remote users into a read-only tool set for the
    * duration of their message, then restore full access once the turn completes.
@@ -50,26 +69,32 @@ export default function (pi: ExtensionAPI): void {
    * Update status widget
    */
   function updateWidget(): void {
-    const config = loadConfig();
+    // See safeNotify's comment — same stale-ctx crash risk applies to
+    // ctx.ui.setWidget when called from deferred/background work.
+    try {
+      const config = loadConfig();
 
-    if (config.showWidget === false) {
-      ctx.ui.setWidget("msg-bridge-status", undefined);
-      return;
-    }
+      if (config.showWidget === false) {
+        ctx.ui.setWidget("msg-bridge-status", undefined);
+        return;
+      }
 
-    const stats = auth.getStats();
-    const transports: TransportStatus[] = transportManager
-      .getStatus()
-      .map((s) => ({
-        type: s.type,
-        connected: s.connected,
-      }));
+      const stats = auth.getStats();
+      const transports: TransportStatus[] = transportManager
+        .getStatus()
+        .map((s) => ({
+          type: s.type,
+          connected: s.connected,
+        }));
 
-    const widget = createStatusWidget(transports, stats.usersByTransport);
-    if (widget) {
-      ctx.ui.setWidget("msg-bridge-status", [widget]);
-    } else {
-      ctx.ui.setWidget("msg-bridge-status", undefined);
+      const widget = createStatusWidget(transports, stats.usersByTransport);
+      if (widget) {
+        ctx.ui.setWidget("msg-bridge-status", [widget]);
+      } else {
+        ctx.ui.setWidget("msg-bridge-status", undefined);
+      }
+    } catch (err) {
+      console.error("[msg-bridge] failed to update status widget (stale ctx?):", err);
     }
   }
 
@@ -92,13 +117,10 @@ export default function (pi: ExtensionAPI): void {
 
     auth = new ChallengeAuth(
       (code, username) => {
-        ctx.ui.notify(
-          `🔐 Challenge code for @${username}: ${code}`,
-          "info"
-        );
+        safeNotify(`🔐 Challenge code for @${username}: ${code}`, "info");
       },
       (message, level) => {
-        ctx.ui.notify(message, level);
+        safeNotify(message, level);
       },
       async (_chatId, _message) => {
         // Challenge notifications are sent via the transport's sendMessage
@@ -178,20 +200,20 @@ export default function (pi: ExtensionAPI): void {
       const transports = transportManager.getAllTransports();
       if (transports.length > 0 && config.autoConnect !== false) {
         if (!acquireLock()) {
-          ctx.ui.notify("ℹ️ msg-bridge: another instance is already connected — skipping auto-connect", "info");
+          safeNotify("ℹ️ msg-bridge: another instance is already connected — skipping auto-connect", "info");
         } else {
           try {
             await transportManager.connectAll();
             updateWidget();
           } catch (err) {
             releaseLock();
-            ctx.ui.notify(`⚠️ Some transports failed to connect: ${(err as Error).message}`, "warning");
+            safeNotify(`⚠️ Some transports failed to connect: ${(err as Error).message}`, "warning");
           }
         }
       }
     })().catch(err => {
       console.error("Transport initialization error:", err);
-      ctx.ui.notify(`❌ Transport initialization failed: ${err.message}`, "error");
+      safeNotify(`❌ Transport initialization failed: ${err.message}`, "error");
     });
 
     transportManager.onMessage((msg) => {
@@ -212,7 +234,7 @@ export default function (pi: ExtensionAPI): void {
     });
 
     transportManager.onError((err, transport) => {
-      ctx.ui.notify(`❌ ${transport} error: ${err.message}`, "error");
+      safeNotify(`❌ ${transport} error: ${err.message}`, "error");
     });
 
     updateWidget();
@@ -285,7 +307,7 @@ export default function (pi: ExtensionAPI): void {
       }
     } catch (err) {
       const transport = pendingRemoteChat?.transport ?? "unknown";
-      ctx.ui.notify(
+      safeNotify(
         `Failed to send response to ${transport}: ${(err as Error).message}`,
         "error"
       );
