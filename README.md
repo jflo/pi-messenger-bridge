@@ -218,6 +218,37 @@ Or:
 export MSG_BRIDGE_DEBUG=true
 ```
 
+## RPC Mode
+
+The bridge works when pi runs with `--mode rpc`, not just in the interactive TUI.
+
+- **Interactive menus are disabled.** `/msg-bridge` (with no subcommand) normally opens a
+  `select`/`input`-driven menu; those dialogs block until an `extension_ui_response` arrives, so
+  a non-UI RPC client would hang forever waiting on one. In RPC mode, `/msg-bridge` instead
+  replies with a single notification listing the direct subcommands to use — same for
+  `/msg-bridge configure` run with no platform argument, which prints the syntax for every
+  platform instead of trying to open the interactive platform selector. All direct subcommands
+  (`/msg-bridge connect`, `/msg-bridge configure slack <bot-token> <app-token>`, etc.) work
+  identically in both modes.
+- **Bridge state is observable via structured events.** The status widget
+  (`ctx.ui.setWidget`) is invisible to most RPC clients, so on meaningful state changes the
+  bridge also writes a JSON line to **stderr**, prefixed with `[msg-bridge:event]`:
+
+  ```
+  [msg-bridge:event] {"type":"transport_connected","transport":"slack","timestamp":"2026-01-01T00:00:00.000Z"}
+  ```
+
+  Event `type`s: `transport_connected`, `transport_disconnected`, `challenge_issued`,
+  `user_authenticated`, `message_received`, `reply_sent`. This is stderr rather than stdout
+  because in RPC mode stdout is pi's own JSON-RPC protocol stream to the client — writing
+  anything else there would corrupt it. A client that wants these events should tail the child
+  process's stderr and parse lines with that prefix.
+- **UI methods degrade the same way they do for any pi extension in RPC mode** — see pi's docs
+  on `ExtensionContext.hasUI` / RPC mode for the full list of what's blocked vs. fire-and-forget.
+  In short: `select`/`input`/`confirm` block on a UI client that may not exist, so this extension
+  avoids calling them in RPC mode; `notify`/`setWidget` are fire-and-forget and safe to call
+  regardless of mode.
+
 ## Architecture
 
 Uses pi's native `sendUserMessage()` and `turn_end` events for two-way communication.

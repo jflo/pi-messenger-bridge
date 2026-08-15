@@ -33,8 +33,24 @@ export class ChallengeAuth {
     private onShowCode: (code: string, username: string) => void,
     private onNotify: (message: string, level?: "info" | "warning" | "error") => void,
     private onSendMessage?: (chatId: string, message: string) => Promise<void>,
-    private onSaveAuth?: () => void
+    private onSaveAuth?: () => void,
+    /** Optional structured-event sink (e.g. for RPC clients); no-op by default so TUI/print callers are unaffected. */
+    private onAuthEvent?: (
+      type: "challenge_issued" | "user_authenticated",
+      data: { userId: string; username: string; transport?: string; code?: string }
+    ) => void
   ) {}
+
+  /**
+   * Split a namespaced "transport:userId" id back into its parts. Uses indexOf rather than
+   * split(":") because some transports' raw ids contain colons themselves (e.g. Matrix mxids
+   * like "@user:homeserver.org").
+   */
+  private splitNamespacedUserId(namespacedUserId: string): { transport?: string; userId: string } {
+    const idx = namespacedUserId.indexOf(":");
+    if (idx === -1) return { userId: namespacedUserId };
+    return { transport: namespacedUserId.slice(0, idx), userId: namespacedUserId.slice(idx + 1) };
+  }
 
   /**
    * Initialize auth state from config
@@ -176,7 +192,9 @@ export class ChallengeAuth {
 
     // Show code in terminal FIRST
     this.onShowCode(code, username);
-    
+    const parsed = this.splitNamespacedUserId(userId);
+    this.onAuthEvent?.("challenge_issued", { userId: parsed.userId, username, transport: parsed.transport, code });
+
     // Then send message to user asking for the code
     if (this.onSendMessage) {
       try {
@@ -350,6 +368,12 @@ export class ChallengeAuth {
       if (this.onSaveAuth) this.onSaveAuth();
       await sendMessage("✅ Authenticated! You can now chat with the agent.");
       this.onNotify(`✅ ${challenge.username} authenticated`, "info");
+      const parsed = this.splitNamespacedUserId(userId);
+      this.onAuthEvent?.("user_authenticated", {
+        userId: parsed.userId,
+        username: challenge.username,
+        transport: parsed.transport,
+      });
       return true;
     }
 

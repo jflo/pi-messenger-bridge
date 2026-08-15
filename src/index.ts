@@ -24,6 +24,41 @@ const ALL_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"];
 
 /**
+ * The installed @earendil-works/pi-coding-agent (0.74) doesn't expose a `mode` field on
+ * ExtensionContext — only `hasUI: boolean` (false in print/RPC mode). Newer pi releases may add
+ * ctx.mode ("rpc" | "tui"); read it defensively via an optional field so this keeps working
+ * whether or not it exists, falling back to !hasUI as the RPC-like signal (no blocking dialogs).
+ *
+ * Narrowed to just the fields this reads (rather than the full ExtensionContext) so callers —
+ * including tests — don't need to fabricate an entire ExtensionContext to use it.
+ */
+type ContextWithOptionalMode = Pick<ExtensionContext, "hasUI"> & { mode?: "rpc" | "tui" };
+
+export function isRpcMode(context: ContextWithOptionalMode): boolean {
+  if (context.mode === "rpc") return true;
+  if (context.mode === "tui") return false;
+  return !context.hasUI;
+}
+
+type MsgBridgeEventType =
+  | "transport_connected"
+  | "transport_disconnected"
+  | "challenge_issued"
+  | "user_authenticated"
+  | "message_received"
+  | "reply_sent";
+
+const CONFIGURE_SYNTAX_HELP = [
+  "Usage: /msg-bridge configure <platform> [args]",
+  "",
+  "  /msg-bridge configure telegram <bot-token>",
+  "  /msg-bridge configure whatsapp [auth-path]",
+  "  /msg-bridge configure slack <bot-token> <app-token>",
+  "  /msg-bridge configure discord <bot-token>",
+  "  /msg-bridge configure matrix <homeserver-url> <access-token>",
+].join("\n");
+
+/**
  * pi-remote-pilot extension
  * Bridges messenger apps (Telegram, WhatsApp, Slack, Discord) into pi
  */
@@ -32,6 +67,7 @@ export default function (pi: ExtensionAPI): void {
   let pendingRemoteChat: PendingRemoteChat | null = null;
   let auth: ChallengeAuth;
   let ctx: ExtensionContext;
+  const lastTransportConnected = new Map<string, boolean>();
 
   /**
    * ctx is captured once per session_start and reused by async work (transport
@@ -49,6 +85,42 @@ export default function (pi: ExtensionAPI): void {
       ctx.ui.notify(message, level);
     } catch (err) {
       console.error(`[msg-bridge] dropped notification (stale ctx?): ${message}`, err);
+    }
+  }
+
+  /**
+   * Emit a structured event for RPC clients on meaningful state changes (transport
+   * connect/disconnect, auth, message activity). No-op outside RPC mode.
+   *
+   * pi's ExtensionAPI has no pi.emit()-style custom event channel to RPC clients (checked
+   * against the installed @earendil-works/pi-coding-agent types). In RPC mode, process.stdout
+   * is pi's own strict-JSONL protocol stream to the client (see modes/rpc/{rpc-mode,jsonl}.js) —
+   * writing anything else there would corrupt it. So this goes to stderr instead, one JSON
+   * object per line, which an RPC client can tail independently of the stdout protocol stream.
+   * Same stale-ctx crash risk as safeNotify applies here (reads ctx.hasUI/ctx.mode).
+   */
+  function emitEvent(type: MsgBridgeEventType, data: Record<string, unknown>): void {
+    try {
+      if (!ctx || !isRpcMode(ctx)) return;
+      const payload = { type, ...data, timestamp: new Date().toISOString() };
+      console.error(`[msg-bridge:event] ${JSON.stringify(payload)}`);
+    } catch (err) {
+      console.error(`[msg-bridge] failed to emit ${type} event (stale ctx?):`, err);
+    }
+  }
+
+  /**
+   * Diff transport connection state against the last-known snapshot and emit
+   * transport_connected/transport_disconnected for anything that changed. Called from
+   * updateWidget() since every connect/disconnect path already calls it.
+   */
+  function emitTransportDiffEvents(): void {
+    for (const s of transportManager.getStatus()) {
+      const prev = lastTransportConnected.get(s.type);
+      if (prev !== s.connected) {
+        emitEvent(s.connected ? "transport_connected" : "transport_disconnected", { transport: s.type });
+      }
+      lastTransportConnected.set(s.type, s.connected);
     }
   }
 
@@ -72,6 +144,7 @@ export default function (pi: ExtensionAPI): void {
     // See safeNotify's comment — same stale-ctx crash risk applies to
     // ctx.ui.setWidget when called from deferred/background work.
     try {
+      emitTransportDiffEvents();
       const config = loadConfig();
 
       if (config.showWidget === false) {
@@ -125,7 +198,8 @@ export default function (pi: ExtensionAPI): void {
       async (_chatId, _message) => {
         // Challenge notifications are sent via the transport's sendMessage
       },
-      saveAuthState
+      saveAuthState,
+      (type, data) => emitEvent(type, data)
     );
 
     if (config.auth) {
@@ -225,6 +299,13 @@ export default function (pi: ExtensionAPI): void {
         threadTs: msg.threadTs,
       };
 
+      emitEvent("message_received", {
+        transport: msg.transport,
+        chatId: msg.chatId,
+        username: msg.username,
+        contentPreview: msg.content.length > 200 ? `${msg.content.slice(0, 200)}…` : msg.content,
+      });
+
       const namespacedUserId = `${msg.transport}:${msg.userId}`;
       const isAdmin = (loadConfig().admins ?? []).includes(namespacedUserId);
       applyToolAccess(isAdmin ? ALL_TOOLS : READ_ONLY_TOOLS);
@@ -296,6 +377,12 @@ export default function (pi: ExtensionAPI): void {
         );
       }
 
+      emitEvent("reply_sent", {
+        transport: pendingRemoteChat.transport,
+        chatId: pendingRemoteChat.chatId,
+        length: fullText.length,
+      });
+
       if (!hasPendingTools) {
         await transportManager.clearTyping(
           pendingRemoteChat.chatId,
@@ -332,6 +419,7 @@ export default function (pi: ExtensionAPI): void {
    */
   pi.on("session_shutdown", async (_event, _context) => {
     await transportManager.disconnectAll();
+    emitTransportDiffEvents();
     releaseLock();
   });
 
@@ -399,7 +487,7 @@ export default function (pi: ExtensionAPI): void {
       const parts = args.trim().split(/\s+/).filter(p => p.length > 0);
       const subcommand = parts[0] || "";
 
-    // No subcommand → open interactive menu
+    // No subcommand → open interactive menu (or, in RPC mode, a help notify — see openMainMenu)
     if (!subcommand || subcommand === "menu") {
       await openMainMenu({
         ui: context.ui,
@@ -407,6 +495,7 @@ export default function (pi: ExtensionAPI): void {
         auth,
         updateWidget,
         cwd: context.cwd,
+        isRpcMode: isRpcMode(context),
       });
       return;
     }
@@ -473,7 +562,12 @@ export default function (pi: ExtensionAPI): void {
         const token = parts.slice(2).join(" ");
 
         if (!platform) {
-          context.ui.notify("Usage: /msg-bridge configure <platform> [token/path]", "error");
+          if (isRpcMode(context)) {
+            // No interactive platform selector in RPC mode — show the direct syntax instead.
+            context.ui.notify(CONFIGURE_SYNTAX_HELP, "info");
+          } else {
+            context.ui.notify("Usage: /msg-bridge configure <platform> [token/path]", "error");
+          }
           return;
         }
 

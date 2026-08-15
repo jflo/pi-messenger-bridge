@@ -2,6 +2,8 @@
  * main-menu.ts — Interactive main menu for /msg-bridge.
  *
  * Shows transport status in the title, with Connect, Configure, Widget, and Help.
+ * In RPC mode this is skipped entirely (see MenuContext.isRpcMode) since select/input/confirm
+ * block waiting for an extension_ui_response that a non-UI RPC client will never send.
  */
 
 import type { ChallengeAuth } from "../auth/challenge-auth.js";
@@ -28,7 +30,25 @@ export interface MenuContext {
   auth: ChallengeAuth;
   updateWidget: () => void;
   cwd: string;
+  /** True when pi is running in RPC mode — blocking dialogs (select/input/confirm) hang there. */
+  isRpcMode: boolean;
 }
+
+// ── RPC mode ────────────────────────────────────────────────────────────────
+
+const RPC_MODE_HELP =
+  "The interactive menu isn't available in RPC mode (no UI client to answer select/input prompts).\n" +
+  "Use these commands directly instead:\n\n" +
+  "  /msg-bridge status                                — connection & user status\n" +
+  "  /msg-bridge connect                               — connect all configured transports\n" +
+  "  /msg-bridge disconnect                            — disconnect all transports\n" +
+  "  /msg-bridge configure telegram <bot-token>\n" +
+  "  /msg-bridge configure whatsapp [auth-path]\n" +
+  "  /msg-bridge configure slack <bot-token> <app-token>\n" +
+  "  /msg-bridge configure discord <bot-token>\n" +
+  "  /msg-bridge configure matrix <homeserver-url> <access-token>\n" +
+  "  /msg-bridge widget                                — toggle status widget\n" +
+  "  /msg-bridge help                                  — full command reference";
 
 // ── Status ──────────────────────────────────────────────────────────────────
 
@@ -225,6 +245,11 @@ function doToggleWidget(mctx: MenuContext): void {
 // ── Main menu ───────────────────────────────────────────────────────────────
 
 export async function openMainMenu(mctx: MenuContext): Promise<void> {
+  if (mctx.isRpcMode) {
+    mctx.ui.notify(RPC_MODE_HELP, "info");
+    return;
+  }
+
   const mainMenu = async (): Promise<void> => {
     const statusLine = getStatusLine(mctx);
     const title = `Message Bridge\n${statusLine}`;
