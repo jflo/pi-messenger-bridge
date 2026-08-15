@@ -218,6 +218,12 @@ export class SlackProvider implements ITransportProvider {
       }
     });
 
+    // /reload slash command — scaffold only, no real behavior wired up yet
+    this.app.command("/reload", async ({ ack, respond }: any) => {
+      await ack();
+      await respond("Reload command received — not yet implemented.");
+    });
+
     // Handle errors
     this.app.error(async (error: any) => {
       console.error("[Slack] Error:", error);
