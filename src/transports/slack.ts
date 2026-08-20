@@ -6,7 +6,14 @@ import type { ExternalMessage, SendMessageOptions } from "../types.js";
 import type { ITransportProvider } from "./interface.js";
 import { formatForSlack } from "./slack-utils.js";
 
-const MAX_UPLOAD_BYTES = 20 * 1024 * 1024; // 20MB
+// Not Slack's limit (it already accepted the upload) — this bounds how much
+// this process will buffer in memory for one attachment: downloadAndSaveFile
+// below reads the whole file into a Buffer via arrayBuffer(), not a stream,
+// so an unbounded cap here means an unbounded amount of memory per
+// attachment on a container that may share the host with other tenants.
+// 100MB comfortably covers real full-color rulebook PDFs (the Pathfinder 2e
+// Player Core, for instance) while still bounding worst case.
+const MAX_UPLOAD_BYTES = 100 * 1024 * 1024; // 100MB
 
 /** Strip anything but a conservative filename character set. */
 function sanitizeFilename(name: string): string {
