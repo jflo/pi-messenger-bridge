@@ -64,6 +64,15 @@ export interface MsgBridgeConfig {
    * first; this only decides how much the agent can do once a message is let through.
    */
   admins?: string[];
+  /**
+   * Names of project-registered custom tools (via pi.registerTool() in a project's own
+   * .pi/extensions/) that non-admins are allowed to call, in addition to pi's fixed read-only
+   * tools. Admins always get every custom tool a project registers — this list only widens what
+   * a non-admin gets. Defaults to none: a custom tool is admin-only until its project explicitly
+   * opts it in here, since pi has no built-in notion of a tool being "safe" for a non-admin
+   * caller — see applyToolAccess()'s use of pi.getAllTools() in index.ts.
+   */
+  playerSafeTools?: string[];
 }
 
 /**

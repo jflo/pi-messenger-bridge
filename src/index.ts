@@ -19,7 +19,10 @@ import { openMainMenu } from "./ui/main-menu.js";
 import { createStatusWidget } from "./ui/status-widget.js";
 
 // Mirrors @earendil-works/pi-coding-agent's fixed ToolName union — not re-exported from the
-// package root, so kept here rather than deep-importing an internal module path.
+// package root, so kept here rather than deep-importing an internal module path. This is only
+// pi's own built-in tool set; a project's own custom tools (registered via pi.registerTool() in
+// its .pi/extensions/) are handled separately below, via getCustomToolNames() — see
+// applyToolAccess()'s call sites and the `playerSafeTools` config field in types.ts.
 const ALL_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"];
 
@@ -135,6 +138,45 @@ export default function (pi: ExtensionAPI): void {
     if (!same) {
       pi.setActiveTools(desired);
     }
+  }
+
+  /**
+   * Every tool name beyond pi's own fixed built-ins (ALL_TOOLS/READ_ONLY_TOOLS) — i.e. whatever
+   * the current project registered itself, via pi.registerTool() in its own .pi/extensions/.
+   *
+   * pi.getAllTools() returns every tool configured for this session regardless of what's
+   * currently active, each tagged with sourceInfo.source: "builtin" for pi's own fixed tools,
+   * anything else ("local" for a project's own extension file, "sdk" for one registered
+   * programmatically) for a tool the project added on purpose. Filtering out "builtin" is how
+   * this stays correct across pi versions without hardcoding a project's tool names here — this
+   * file has no way to know what any given downstream project registers.
+   *
+   * Fixes gorgors-notebook#14's discovery (see pi-messenger-bridge#10): previously,
+   * applyToolAccess(ALL_TOOLS) / applyToolAccess(READ_ONLY_TOOLS) — both hardcoded to pi's 7
+   * built-in names — completely replaced the active tool set via pi.setActiveTools() on every
+   * bridge-driven turn, silently excluding every custom tool for admin and non-admin alike.
+   */
+  function getCustomToolNames(): string[] {
+    return pi.getAllTools()
+      .filter((tool) => tool.sourceInfo.source !== "builtin")
+      .map((tool) => tool.name);
+  }
+
+  /**
+   * The tool set a given caller should have for the duration of one bridge-driven message:
+   * pi's built-ins (ALL_TOOLS for admins, READ_ONLY_TOOLS otherwise) plus custom tools. Admins
+   * always get every custom tool the project registered — matching ALL_TOOLS' original "full
+   * access" intent. Non-admins only get the subset explicitly opted in via the project's
+   * `playerSafeTools` config (see types.ts) — defaults to none, so this is additive-only and
+   * never widens a non-admin's access unless a project asks for it.
+   */
+  function resolveToolAccess(isAdmin: boolean): string[] {
+    const customTools = getCustomToolNames();
+    if (isAdmin) {
+      return [...ALL_TOOLS, ...customTools];
+    }
+    const playerSafeTools = loadConfig().playerSafeTools ?? [];
+    return [...READ_ONLY_TOOLS, ...customTools.filter((name) => playerSafeTools.includes(name))];
   }
 
   /**
@@ -308,7 +350,7 @@ export default function (pi: ExtensionAPI): void {
 
       const namespacedUserId = `${msg.transport}:${msg.userId}`;
       const isAdmin = (loadConfig().admins ?? []).includes(namespacedUserId);
-      applyToolAccess(isAdmin ? ALL_TOOLS : READ_ONLY_TOOLS);
+      applyToolAccess(resolveToolAccess(isAdmin));
 
       const taggedMessage = `[📱 @${msg.username} via ${msg.transport}]: ${msg.content}`;
       pi.sendUserMessage(taggedMessage, { deliverAs: "followUp" });
@@ -389,7 +431,7 @@ export default function (pi: ExtensionAPI): void {
           pendingRemoteChat.transport,
           pendingRemoteChat.messageId
         );
-        applyToolAccess(ALL_TOOLS);
+        applyToolAccess(resolveToolAccess(true));
         pendingRemoteChat = null;
       }
     } catch (err) {
@@ -409,7 +451,7 @@ export default function (pi: ExtensionAPI): void {
           // Ignore — best-effort cleanup
         }
       }
-      applyToolAccess(ALL_TOOLS);
+      applyToolAccess(resolveToolAccess(true));
       pendingRemoteChat = null;
     }
   });
