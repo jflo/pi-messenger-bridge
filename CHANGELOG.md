@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `applyToolAccess()` no longer strips every project-registered custom tool (via `pi.registerTool()`) from a bridge-driven turn — it previously hardcoded `pi.setActiveTools()` to pi's own 7 built-in tool names, which *replaces* the whole active set, silently excluding any custom tool for admin and non-admin alike (#10)
+
+### Added
+- `safeTools` config option: a list of custom tool names non-admins are allowed to call, in addition to pi's fixed read-only tools. Admins now get every custom tool a project registers automatically; non-admins get none by default (fail closed) unless a project opts a tool in here
+
 ## [0.4.0] - 2026-05-09
 
 ### Added

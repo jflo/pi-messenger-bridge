@@ -173,6 +173,7 @@ Example config:
     "adminUserId": "telegram:789"
   },
   "admins": ["telegram:789"],
+  "safeTools": ["my_custom_tool"],
   "autoConnect": true,
   "showWidget": true,
   "debug": false
@@ -180,6 +181,8 @@ Example config:
 ```
 
 `admins` (namespaced `transport:userId`, edit the config file directly — no chat command for this yet) controls tool access, layered on top of the existing trust/channel authorization above: any already-authorized user in this list gets full read-write tool access; everyone else gets read-only tools (`read`/`grep`/`find`/`ls` — no `bash`/`edit`/`write`) for the duration of processing their message. This is a single global toggle shared with your local terminal session, not a per-conversation sandbox — tools are restricted right before a non-admin's message is forwarded to the agent and restored to full access once that turn completes (including on error).
+
+Tool access applies to **every** tool, not just pi's own built-ins — including custom tools a project registers via `pi.registerTool()` in its own `.pi/extensions/`. Admins get every registered tool automatically. Non-admins get none of them by default (fail closed) unless a project explicitly opts a tool in via `safeTools` (a list of tool names) — since pi has no built-in notion of a tool being "safe" for a non-admin caller, this bridge has no way to guess which of a project's custom tools are appropriate to expose without the project saying so.
 
 ## Environment Variables
 
