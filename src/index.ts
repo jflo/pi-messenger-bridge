@@ -22,7 +22,7 @@ import { createStatusWidget } from "./ui/status-widget.js";
 // package root, so kept here rather than deep-importing an internal module path. This is only
 // pi's own built-in tool set; a project's own custom tools (registered via pi.registerTool() in
 // its .pi/extensions/) are handled separately below, via getCustomToolNames() — see
-// applyToolAccess()'s call sites and the `playerSafeTools` config field in types.ts.
+// applyToolAccess()'s call sites and the `safeTools` config field in types.ts.
 const ALL_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"];
 
@@ -167,16 +167,16 @@ export default function (pi: ExtensionAPI): void {
    * pi's built-ins (ALL_TOOLS for admins, READ_ONLY_TOOLS otherwise) plus custom tools. Admins
    * always get every custom tool the project registered — matching ALL_TOOLS' original "full
    * access" intent. Non-admins only get the subset explicitly opted in via the project's
-   * `playerSafeTools` config (see types.ts) — defaults to none, so this is additive-only and
-   * never widens a non-admin's access unless a project asks for it.
+   * `safeTools` config (see types.ts) — defaults to none, so this is additive-only and never
+   * widens a non-admin's access unless a project asks for it.
    */
   function resolveToolAccess(isAdmin: boolean): string[] {
     const customTools = getCustomToolNames();
     if (isAdmin) {
       return [...ALL_TOOLS, ...customTools];
     }
-    const playerSafeTools = loadConfig().playerSafeTools ?? [];
-    return [...READ_ONLY_TOOLS, ...customTools.filter((name) => playerSafeTools.includes(name))];
+    const safeTools = loadConfig().safeTools ?? [];
+    return [...READ_ONLY_TOOLS, ...customTools.filter((name) => safeTools.includes(name))];
   }
 
   /**

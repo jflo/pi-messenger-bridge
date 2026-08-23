@@ -72,7 +72,7 @@ export interface MsgBridgeConfig {
    * opts it in here, since pi has no built-in notion of a tool being "safe" for a non-admin
    * caller — see applyToolAccess()'s use of pi.getAllTools() in index.ts.
    */
-  playerSafeTools?: string[];
+  safeTools?: string[];
 }
 
 /**

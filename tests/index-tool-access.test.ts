@@ -69,8 +69,8 @@ describe("custom tool access across a bridge-driven turn", () => {
     );
   });
 
-  it("non-admin caller: gets read-only built-ins plus only playerSafeTools-listed custom tools", async () => {
-    writeConfig({ admins: ["slack:U_ADMIN"], playerSafeTools: ["custom_tool_a"] });
+  it("non-admin caller: gets read-only built-ins plus only safeTools-listed custom tools", async () => {
+    writeConfig({ admins: ["slack:U_ADMIN"], safeTools: ["custom_tool_a"] });
     const { setActiveTools, getAllTools, triggerMessage } = await setupExtensionWithTrigger();
 
     getAllTools.mockReturnValue([
@@ -79,7 +79,7 @@ describe("custom tool access across a bridge-driven turn", () => {
       { name: "custom_tool_b", sourceInfo: { source: "local" } },
     ]);
 
-    await triggerMessage({ transport: "slack", userId: "U_PLAYER" });
+    await triggerMessage({ transport: "slack", userId: "U_NONADMIN" });
 
     expect(setActiveTools).toHaveBeenCalledTimes(1);
     const desired = setActiveTools.mock.calls[0][0] as string[];
@@ -89,20 +89,20 @@ describe("custom tool access across a bridge-driven turn", () => {
     expect(desired).not.toContain("write");
   });
 
-  it("non-admin caller with no playerSafeTools configured: gets only pi's read-only built-ins (default-closed)", async () => {
+  it("non-admin caller with no safeTools configured: gets only pi's read-only built-ins (default-closed)", async () => {
     writeConfig({ admins: ["slack:U_ADMIN"] });
     const { setActiveTools, getAllTools, triggerMessage } = await setupExtensionWithTrigger();
 
     getAllTools.mockReturnValue([...BUILTIN_TOOL_INFOS, { name: "custom_tool_a", sourceInfo: { source: "local" } }]);
 
-    await triggerMessage({ transport: "slack", userId: "U_PLAYER" });
+    await triggerMessage({ transport: "slack", userId: "U_NONADMIN" });
 
     const desired = setActiveTools.mock.calls[0][0] as string[];
     expect(new Set(desired)).toEqual(new Set(["read", "grep", "find", "ls"]));
   });
 
   it("turn_end restore gives back every custom tool, not just pi's built-ins (matches pre-existing ALL_TOOLS restore intent)", async () => {
-    writeConfig({ admins: ["slack:U_ADMIN"], playerSafeTools: ["custom_tool_a"] });
+    writeConfig({ admins: ["slack:U_ADMIN"], safeTools: ["custom_tool_a"] });
     const { handlers, setActiveTools, getAllTools, triggerMessage } = await setupExtensionWithTrigger();
 
     getAllTools.mockReturnValue([
@@ -112,7 +112,7 @@ describe("custom tool access across a bridge-driven turn", () => {
     ]);
 
     // A non-admin's message narrows to read-only + custom_tool_a only.
-    await triggerMessage({ transport: "slack", userId: "U_PLAYER" });
+    await triggerMessage({ transport: "slack", userId: "U_NONADMIN" });
     expect(new Set(setActiveTools.mock.calls[0][0] as string[])).toEqual(
       new Set(["read", "grep", "find", "ls", "custom_tool_a"])
     );
