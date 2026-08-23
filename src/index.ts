@@ -101,7 +101,15 @@ export default function (pi: ExtensionAPI): void {
    */
   function emitEvent(type: MsgBridgeEventType, data: Record<string, unknown>): void {
     try {
-      if (!ctx || !isRpcMode(ctx)) return;
+      if (!ctx || !isRpcMode(ctx)) {
+        // TEMP diagnostic (gorgor-infra investigation: message_received/reply_sent
+        // never appear in RPC output despite transport_connected/challenge_issued
+        // working fine) — remove once root-caused.
+        console.error(
+          `[msg-bridge:diag] emitEvent(${type}) suppressed: ctxDefined=${!!ctx} hasUI=${ctx?.hasUI} mode=${(ctx as unknown as { mode?: string })?.mode}`
+        );
+        return;
+      }
       const payload = { type, ...data, timestamp: new Date().toISOString() };
       console.error(`[msg-bridge:event] ${JSON.stringify(payload)}`);
     } catch (err) {
